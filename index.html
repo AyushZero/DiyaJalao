@@ -1,0 +1,476 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Endless Diyas</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hind:wght@400&family=Yatra+One&display=swap">
+<style>
+/* Layout: nothing but a night canvas. One flat diya, then an endless field. Two faint lines of text, no controls. */
+:root {
+  --night: #0b0810;
+  --flame: #ffd48a;
+  --ink: #f3e6d0;
+  --dim: #8f7f70;
+  --display: 'Yatra One', 'Tiro Devanagari Hindi', Georgia, serif;
+  --body: 'Hind', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: dark;
+}
+html { box-sizing: border-box; height: 100%; background: var(--night); }
+body {
+  margin: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  background: var(--night);
+  color: var(--ink);
+  font: 400 15px/1.4 var(--body);
+  padding-block: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  outline: none;
+}
+body[data-state="intro"] canvas { cursor: pointer; }
+body[data-state="play"] canvas { cursor: crosshair; }
+
+.ui {
+  position: relative;
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-block: 18px;
+  pointer-events: none;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.9);
+}
+.top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 1.6s ease;
+}
+body[data-state="play"] .top { opacity: 1; }
+.deva { font-family: var(--display); font-size: 19px; line-height: 1.2; color: var(--flame); }
+.count { font-size: 13px; color: var(--dim); font-variant-numeric: tabular-nums; letter-spacing: 0.06em; }
+
+.bottom { margin-top: auto; display: grid; justify-items: center; text-align: center; }
+.bottom > * { grid-area: 1 / 1; margin: 0; }
+.say, .hint { font-size: 14px; letter-spacing: 0.12em; color: var(--dim); opacity: 0; transition: opacity 0.9s ease; }
+body[data-state="intro"] .say { opacity: 1; animation: pulse 2.8s ease-in-out infinite; }
+.hint.on { opacity: 1; }
+@keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  body[data-state="intro"] .say { animation: none; }
+  .top, .say, .hint { transition: none; }
+}
+</style>
+
+<canvas id="c" tabindex="0" aria-label="An endless field of diyas. Tap to light the first one, then drag across the others to light them."></canvas>
+<div class="ui">
+  <header class="top">
+    <span class="deva" lang="hi">शुभ दीपावली</span>
+    <span class="count" id="n">0</span>
+  </header>
+  <div class="bottom">
+    <p class="say">tap the diya</p>
+    <p class="hint" id="hint" role="status"></p>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const S = 28, SY = S * 0.866, JIT = 0.22, DW = 0.62 * S;   // lattice spacing, jitter, diya width (world units)
+  const BIG = 110, CLEAR = 82;                                // first diya width and the empty ring around it
+  const BRUSH_PX = 20, MAXZ = 10, MAXV = 40000;
+  const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const COARSE = matchMedia('(pointer: coarse)').matches;
+  const IGNITE_MS = RM ? 400 : 1500, ZDUR = RM ? 1200 : 8000, RAMP = RM ? 200 : 700;
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const nEl = document.getElementById('n'), hint = document.getElementById('hint');
+
+  /* ---------- endless field: every diya is computed from its cell, nothing is stored except what is lit ---------- */
+  const lit = new Map();
+  let centerLit = 0;
+  const kOf = (i, j) => (j + 40000) * 80000 + (i + 40000);
+  let px = 0, py = 0, pw = 0, pp = 0;
+  function cell(i, j) {
+    let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + 1013904223) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+    const a = (h & 1023) / 1023, b = ((h >>> 10) & 1023) / 1023, c = ((h >>> 20) & 1023) / 1023;
+    px = (i + 0.5 * (j & 1)) * S + (a - 0.5) * 2 * JIT * S;
+    py = j * SY + (b - 0.5) * 2 * JIT * S;
+    pw = DW * (0.9 + 0.2 * c); pp = c;
+  }
+
+  /* ---------- the name, spelled in dots just below the first diya ---------- */
+  const GLYPHS = {
+    A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+    D: ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+    I: ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+    T: ['11111', '00100', '00100', '00100', '00100', '00100', '00100']
+  };
+  const NAME = 'ADITI', NG = 26, NDW = 20, NCY = 0;
+  const NX = [], NYS = [];
+  let NC = -1;            // the dot at the very middle of the name: the first diya
+  const pending = [];     // name diyas waiting for their moment to light
+  {
+    const cols = NAME.length * 6 - 1;
+    let c0 = 0;
+    for (const ch of NAME) {
+      const g = GLYPHS[ch];
+      for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) {
+        if (g[r][c] === '1') {
+          const x = (c0 + c - (cols - 1) / 2) * NG, y = NCY + (r - 3) * NG;
+          if (x === 0 && y === NCY) NC = NX.length;
+          NX.push(x); NYS.push(y);
+        }
+      }
+      c0 += 6;
+    }
+  }
+  const NHALFW = (NAME.length * 6 - 1) * NG / 2 + 30, NHALFH = 7 * NG / 2 + 30;
+  const inName = (x, y) => Math.abs(x) < NHALFW && Math.abs(y - NCY) < NHALFH;
+
+  /* ---------- sprites: flat bowl, two-tone flame, soft glow ---------- */
+  const LEVELS = [9, 3, 1, 0.3];
+  const mk = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(2, Math.ceil(w)); c.height = Math.max(2, Math.ceil(h)); return c; };
+  function drawBowl(g, on) {
+    // clay body with a small spout on the right
+    g.beginPath();
+    g.moveTo(10, 10);
+    g.bezierCurveTo(10, 30, 28, 42, 50, 42);
+    g.bezierCurveTo(72, 42, 88, 30, 90, 14);
+    g.bezierCurveTo(93, 12, 96, 9, 100, 6);
+    g.quadraticCurveTo(96, 9, 90, 10);
+    g.closePath();
+    const gr = g.createLinearGradient(0, 8, 0, 42);
+    gr.addColorStop(0, on ? '#d8773c' : '#82482f');
+    gr.addColorStop(1, on ? '#9a4724' : '#4d281a');
+    g.fillStyle = gr; g.fill();
+    // rim and the pool of oil inside it
+    g.fillStyle = on ? '#f0a463' : '#9a5a40';
+    g.beginPath(); g.ellipse(50, 10, 40, 6.5, 0, 0, 6.2832); g.fill();
+    g.fillStyle = on ? '#ffc65a' : '#2a140d';
+    g.beginPath(); g.ellipse(50, 10.5, 34, 4.2, 0, 0, 6.2832); g.fill();
+  }
+  function teardrop(g) {
+    g.beginPath();
+    g.moveTo(20, 0);
+    g.bezierCurveTo(26, 16, 38, 32, 38, 48);
+    g.bezierCurveTo(38, 60, 30, 70, 20, 70);
+    g.bezierCurveTo(10, 70, 2, 60, 2, 48);
+    g.bezierCurveTo(2, 32, 14, 16, 20, 0);
+    g.closePath();
+  }
+  const bowlDark = [], bowlLit = [], flames = [];
+  for (const k of LEVELS) {
+    for (const [arr, on] of [[bowlDark, false], [bowlLit, true]]) {
+      const c = mk(100 * k, 44 * k), g = c.getContext('2d');
+      g.scale(c.width / 100, c.height / 44); drawBowl(g, on); arr.push(c);
+    }
+    const f = mk(40 * k, 70 * k), g = f.getContext('2d');
+    g.scale(f.width / 40, f.height / 70);
+    g.fillStyle = '#ffb347'; teardrop(g); g.fill();
+    g.save(); g.translate(20, 66); g.scale(0.5, 0.52); g.translate(-20, -66);
+    g.fillStyle = '#fff3c8'; teardrop(g); g.fill(); g.restore();
+    flames.push(f);
+  }
+  const glow = mk(128, 128);
+  {
+    const g = glow.getContext('2d');
+    const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(255,190,90,.9)'); gr.addColorStop(0.25, 'rgba(255,150,50,.38)');
+    gr.addColorStop(0.6, 'rgba(255,110,30,.1)'); gr.addColorStop(1, 'rgba(255,90,20,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  }
+  function pick(need) {
+    for (let i = LEVELS.length - 1; i >= 0; i--) if (LEVELS[i] >= need) return i;
+    return 0;
+  }
+
+  /* ---------- camera and state ---------- */
+  let W = 0, H = 0, dpr = 1;
+  const cam = { x: 0, y: 0, z: 2 };
+  let state = 'intro', igniteAt = 0, zoomT0 = 0, zStart = 1, revealR = 0, lastCount = -1, hinted = false;
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const introZoom = () => Math.min(W, H * 0.8) * 0.55 / NDW;
+  const zEnd = () => clamp(Math.sqrt(W * H / (3500 * 0.866)) / S, 0.2, 2);   // roughly 3,500 diyas on screen
+  const minZ = () => zEnd() * 0.72;
+  function setState(s) { state = s; document.body.dataset.state = s; }
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    if (!W || !H) return;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    if (state === 'intro' || state === 'igniting') cam.z = introZoom();
+    else if (state === 'play') cam.z = Math.max(cam.z, minZ());
+  }
+  window.addEventListener('resize', resize);
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(canvas);
+  setState('intro');
+  resize();
+
+  /* ---------- lighting ---------- */
+  // the name lights outward from the first diya, each dot just as the view reaches it
+  const REVEAL_FMIN = 4, qOf = (p) => 1 - Math.pow(1 - p, 2.2);
+  const revealMax = () => Math.hypot(W, H) / 2 / zEnd() + 220;
+  function scheduleName(t0) {
+    const L = Math.log(revealMax() / REVEAL_FMIN);
+    for (let n = 0; n < NX.length; n++) {
+      if (n === NC) continue;
+      const d = Math.hypot(NX[n], NYS[n]);
+      const q = clamp(Math.log(Math.max(d, REVEAL_FMIN) / REVEAL_FMIN) / L, 0, 0.999);
+      const p = 1 - Math.pow(1 - q, 1 / 2.2);
+      pending.push([-1 - n, t0 + p * ZDUR + 250 + Math.random() * 120]);
+    }
+  }
+  function ignite() {
+    if (state !== 'intro') return;
+    const t = performance.now();
+    lit.set(-1 - NC, t); igniteAt = t; setState('igniting');
+  }
+  let hintTimer = 0;
+  function showHint() {
+    hint.textContent = COARSE ? 'drag to light · two fingers to move' : 'drag to light · shift-drag to move · scroll to zoom';
+    hint.classList.add('on');
+    hintTimer = setTimeout(() => hint.classList.remove('on'), 12000);
+  }
+  function noteLit() {
+    if (hinted) return;
+    hinted = true; clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => hint.classList.remove('on'), 2600);
+  }
+  function lightAt(wx, wy, rw) {
+    const now = performance.now(), reach = rw + 7;
+    const i0 = Math.floor((wx - reach) / S - 0.75) - 1, i1 = Math.floor((wx + reach) / S) + 1;
+    const j0 = Math.floor((wy - reach) / SY) - 1, j1 = Math.floor((wy + reach) / SY) + 1;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      cell(i, j);
+      if (inName(px, py)) continue;
+      const d = Math.hypot(px - wx, py - wy);
+      if (d < reach) {
+        const k = kOf(i, j);
+        if (!lit.has(k)) { lit.set(k, now + (d / reach) * 70 + Math.random() * 50); noteLit(); }
+      }
+    }
+    for (let n = 0; n < NX.length; n++) {
+      if (lit.has(-1 - n)) continue;
+      const d = Math.hypot(NX[n] - wx, NYS[n] - wy);
+      if (d < reach) { lit.set(-1 - n, now + (d / reach) * 70 + Math.random() * 50); noteLit(); }
+    }
+  }
+  function brushSeg(ax, ay, bx, by) {
+    const z = cam.z, rw = Math.max(BRUSH_PX / z, 10);
+    const wax = cam.x + (ax - W / 2) / z, way = cam.y + (ay - H / 2) / z;
+    const wbx = cam.x + (bx - W / 2) / z, wby = cam.y + (by - H / 2) / z;
+    const steps = Math.max(1, Math.ceil(Math.hypot(wbx - wax, wby - way) / (rw * 0.6)));
+    for (let s = 0; s <= steps; s++) {
+      const u = s / steps;
+      lightAt(wax + (wbx - wax) * u, way + (wby - way) * u, rw);
+    }
+  }
+
+  /* ---------- input: drag lights, two fingers move and zoom ---------- */
+  const ptrs = new Map();
+  let gest = null, pinch = null;
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  function zoomAround(sx, sy, f) {
+    const wx = cam.x + (sx - W / 2) / cam.z, wy = cam.y + (sy - H / 2) / cam.z;
+    const z = clamp(cam.z * f, minZ(), MAXZ);
+    cam.x = wx - (sx - W / 2) / z; cam.y = wy - (sy - H / 2) / z; cam.z = z;
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    if (state === 'intro') { ignite(); return; }
+    if (state !== 'play') return;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    const p = pos(e); ptrs.set(e.pointerId, p);
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, z: cam.z, cx: cam.x, cy: cam.y };
+      gest = null; return;
+    }
+    if (ptrs.size > 2) return;
+    const pan = e.button !== 0 || e.shiftKey;
+    gest = { id: e.pointerId, type: pan ? 'pan' : 'light', x: p.x, y: p.y };
+    if (!pan) brushSeg(p.x, p.y, p.x, p.y);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!ptrs.has(e.pointerId)) return;
+    const p = pos(e); ptrs.set(e.pointerId, p);
+    if (pinch && ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1, mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const z = clamp(pinch.z * d / pinch.d, minZ(), MAXZ);
+      const wx = pinch.cx + (pinch.mx - W / 2) / pinch.z, wy = pinch.cy + (pinch.my - H / 2) / pinch.z;
+      cam.z = z; cam.x = wx - (mx - W / 2) / z; cam.y = wy - (my - H / 2) / z;
+    } else if (gest && gest.id === e.pointerId) {
+      if (gest.type === 'light') brushSeg(gest.x, gest.y, p.x, p.y);
+      else { cam.x -= (p.x - gest.x) / cam.z; cam.y -= (p.y - gest.y) / cam.z; }
+      gest.x = p.x; gest.y = p.y;
+    }
+  });
+  function endPtr(e) {
+    ptrs.delete(e.pointerId);
+    if (pinch && ptrs.size < 2) {
+      pinch = null;
+      if (ptrs.size === 1) { const [id, p] = [...ptrs.entries()][0]; gest = { id, type: 'pan', x: p.x, y: p.y }; }
+    }
+    if (gest && gest.id === e.pointerId) gest = null;
+  }
+  canvas.addEventListener('pointerup', endPtr);
+  canvas.addEventListener('pointercancel', endPtr);
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (state !== 'play') return;
+    const p = pos(e);
+    zoomAround(p.x, p.y, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));
+  }, { passive: false });
+  window.addEventListener('keydown', (e) => {
+    if (state === 'intro' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); ignite(); return; }
+    if (state !== 'play') return;
+    const step = 90 / cam.z;
+    if (e.key === 'ArrowLeft') cam.x -= step; else if (e.key === 'ArrowRight') cam.x += step;
+    else if (e.key === 'ArrowUp') cam.y -= step; else if (e.key === 'ArrowDown') cam.y += step;
+    else if (e.key === '+' || e.key === '=') zoomAround(W / 2, H / 2, 1.2);
+    else if (e.key === '-') zoomAround(W / 2, H / 2, 1 / 1.2);
+  });
+
+  /* ---------- render ---------- */
+  const VX = new Float32Array(MAXV), VY = new Float32Array(MAXV), VW = new Float32Array(MAXV);
+  const VP = new Float32Array(MAXV), VA = new Float32Array(MAXV), VF = new Float32Array(MAXV), VH = new Float32Array(MAXV), VN = new Uint8Array(MAXV);
+
+  function frame(t) {
+    requestAnimationFrame(frame);
+    if (!W || !H) return;
+
+    if (state === 'igniting' && t - igniteAt > IGNITE_MS) { zStart = cam.z; zoomT0 = t; scheduleName(t); setState('zooming'); }
+    if (state === 'zooming') {
+      const p = Math.min(1, (t - zoomT0) / ZDUR);
+      const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+      const ze = zEnd();
+      cam.z = zStart * Math.pow(ze / zStart, e); cam.x = 0; cam.y = 0;
+      revealR = REVEAL_FMIN * Math.pow(revealMax() / REVEAL_FMIN, qOf(p));
+      if (p >= 1) { revealR = Infinity; setState('play'); showHint(); }
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    if (pending.length) {
+      for (let q = pending.length - 1; q >= 0; q--) {
+        if (t >= pending[q][1]) {
+          if (!lit.has(pending[q][0])) lit.set(pending[q][0], pending[q][1]);
+          pending.splice(q, 1);
+        }
+      }
+    }
+    ctx.fillStyle = '#0b0810'; ctx.fillRect(0, 0, W, H);
+
+    const z = cam.z;
+    ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
+    const mx = W / (2 * z) + 60, my = H / (2 * z) + 60;
+    const x0 = cam.x - mx, x1 = cam.x + mx, y0 = cam.y - my, y1 = cam.y + my;
+    const amp = RM ? 0.25 : 1;
+    const fOf = (li) => (li && t >= li) ? Math.min(1, (t - li) / RAMP) : 0;
+
+    // gather what is on screen
+    let nv = 0;
+    VX[0] = 0; VY[0] = 0; VW[0] = BIG; VP[0] = 0.37; VA[0] = 1; VF[0] = fOf(centerLit); VN[0] = 0;
+    const i0 = Math.floor(x0 / S - 0.75) - 1, i1 = Math.floor(x1 / S) + 1;
+    const j0 = Math.floor(y0 / SY) - 1, j1 = Math.floor(y1 / SY) + 1;
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      cell(i, j);
+      if (px < x0 || px > x1 || py < y0 || py > y1) continue;
+      const r2 = px * px + py * py;
+      if (inName(px, py)) continue;
+      const a = Math.min(1, (revealR - Math.sqrt(r2)) / 140);
+      if (a <= 0.004) continue;
+      if (nv >= MAXV) break;
+      const li = lit.get(kOf(i, j));
+      VX[nv] = px; VY[nv] = py; VW[nv] = pw; VP[nv] = pp; VA[nv] = a; VF[nv] = li === undefined ? 0 : fOf(li); VN[nv] = 0;
+      nv++;
+    }
+    for (let n = 0; n < NX.length; n++) {
+      const x = NX[n], y = NYS[n];
+      if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+      const a = n === NC ? 1 : Math.min(1, (revealR - Math.hypot(x, y)) / 140);
+      if (a <= 0.004 || nv >= MAXV) continue;
+      const li = lit.get(-1 - n);
+      VX[nv] = x; VY[nv] = y; VW[nv] = NDW; VP[nv] = (n * 0.137) % 1; VA[nv] = a;
+      VF[nv] = li === undefined ? 0 : fOf(li); VN[nv] = 1;
+      nv++;
+    }
+
+    // pass 1: bowls (tiny ones are batched as plain shapes)
+    const pd = new Path2D(), pl = new Path2D(), pf = new Path2D();
+    for (let k = 0; k < nv; k++) {
+      const x = VX[k], y = VY[k], w = VW[k], a = VA[k], f = VF[k], sw = w * z;
+      if (sw < 7) {
+        if (sw < 1.2) continue;
+        if (a >= 0.98) {
+          (f > 0.5 ? pl : pd).rect(x - w / 2, y + w * 0.1, w, w * 0.34);
+          if (f > 0.3) pf.rect(x - w * 0.13, y - w * 0.24, w * 0.26, w * 0.36);
+        } else {
+          ctx.globalAlpha = a; ctx.fillStyle = f > 0.5 ? '#d9743c' : '#6a3a29';
+          ctx.fillRect(x - w / 2, y + w * 0.1, w, w * 0.34);
+        }
+        continue;
+      }
+      const h = w * 0.44, lv = pick(w / 100 * z * dpr);
+      const bx = x - w / 2, by = y + w * 0.02;
+      ctx.globalAlpha = a;
+      ctx.drawImage(bowlDark[lv], bx, by, w, h);
+      if (f > 0) { ctx.globalAlpha = a * f; ctx.drawImage(bowlLit[lv], bx, by, w, h); }
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#6a3a29'; ctx.fill(pd);
+    ctx.fillStyle = '#d9743c'; ctx.fill(pl);
+    ctx.fillStyle = '#ffd27a'; ctx.fill(pf);
+
+    // pass 2: glow
+    ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < nv; k++) {
+      const f = VF[k];
+      if (f <= 0) continue;
+      const w = VW[k], ph = VP[k] * 6.2832, ef = f * (2 - f);
+      const fl = 1 + amp * (0.09 * Math.sin(t * 0.011 + ph) + 0.05 * Math.sin(t * 0.029 + ph * 2.3));
+      const fh = w * 0.5 * ef * fl; VH[k] = fh;
+      const gr = w * (VN[k] ? 2.3 : 1.8) * (0.35 + 0.65 * ef) * (0.97 + 0.03 * fl);
+      ctx.globalAlpha = VA[k] * f * (VN[k] ? 0.45 : 0.3);
+      ctx.drawImage(glow, VX[k] - gr, VY[k] + w * 0.12 - fh * 0.5 - gr, gr * 2, gr * 2);
+    }
+
+    // pass 3: flames (only where they are big enough to see)
+    ctx.globalCompositeOperation = 'source-over';
+    for (let k = 0; k < nv; k++) {
+      const f = VF[k], w = VW[k];
+      if (f <= 0 || w * z < 7) continue;
+      const ph = VP[k] * 6.2832, fh = VH[k], fw = fh * 0.57;
+      const sway = Math.sin(t * 0.0075 + ph * 1.7) * 0.05 * fw * amp;
+      ctx.globalAlpha = VA[k] * Math.min(1, f * 2);
+      ctx.drawImage(flames[pick(fh / 70 * z * dpr)], VX[k] - fw / 2 + sway, VY[k] + w * 0.12 - fh, fw, fh);
+    }
+    ctx.globalAlpha = 1;
+
+    const count = lit.size + (centerLit ? 1 : 0);
+    if (count !== lastCount) { lastCount = count; nEl.textContent = count.toLocaleString('en-IN'); }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body></html>
